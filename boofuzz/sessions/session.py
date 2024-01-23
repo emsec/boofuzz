@@ -104,6 +104,14 @@ class Session(pgraph.Graph):
 
     .. versionchanged:: 0.4.2
        This class has been moved into the sessions subpackage. The full path is now boofuzz.sessions.session.Session.
+
+        # CHANGES:
+        # Store the fuzzer_name, slack_notification, count_test_cases, and start_depth setting in the Session object.
+        #   The start_depth argument specifies how many primitives are at least fuzzed in parallel.
+        # Keep microseconds in results folder name to have distinct ids when starting multiple fuzzers in parallel.
+        # Change path for .db files and derive the .db file name from the fuzzer name.
+        # Disable logging to a database file if the disable_db_logger argument is passed.
+        # Insert a special test case into the database so the web app shows all initialization logs as test case 0.
     """
 
     def __init__(
@@ -138,6 +146,13 @@ class Session(pgraph.Graph):
         target=None,
         web_address=constants.DEFAULT_WEB_UI_ADDRESS,
         db_filename=None,
+        # CHANGE START
+        fuzzer_name: str = None,
+        slack_notification: bool = False,
+        count_test_cases: bool = False,
+        start_depth: int = 1,
+        disable_db_logger: bool = False,
+        # CHANGE END
     ):
         self._ignore_connection_reset = ignore_connection_reset
         self._ignore_connection_aborted = ignore_connection_aborted
@@ -171,21 +186,73 @@ class Session(pgraph.Graph):
             else:
                 fuzz_loggers = [fuzz_logger_text.FuzzLoggerText()]
 
-        self._run_id = datetime.datetime.utcnow().replace(microsecond=0).isoformat().replace(":", "-")
-        if db_filename is not None:
-            helpers.mkdir_safe(db_filename, file_included=True)
-            self._db_filename = db_filename
-        else:
-            helpers.mkdir_safe(os.path.join(constants.RESULTS_DIR))
-            self._db_filename = os.path.join(constants.RESULTS_DIR, "run-{0}.db".format(self._run_id))
-
-        self._db_logger = fuzz_logger_db.FuzzLoggerDb(
-            db_filename=self._db_filename, num_log_cases=fuzz_db_keep_only_n_pass_cases
+        self._run_id = (
+            datetime.datetime.utcnow()
+            # CHANGE START
+            # .replace(microsecond=0)
+            # CHANGE END
+            .isoformat().replace(":", "-")
         )
+
+        # CHANGE START
+        self.fuzzer_name = f"{fuzzer_name}_{self._run_id}"
+        self._slack_notification = slack_notification
+        self._count_test_cases = count_test_cases
+        self._start_depth = start_depth
+
+        # if db_filename is not None:
+        #     helpers.mkdir_safe(db_filename, file_included=True)
+        #     self._db_filename = db_filename
+        # else:
+        #     helpers.mkdir_safe(os.path.join(constants.RESULTS_DIR))
+        #     self._db_filename = os.path.join(constants.RESULTS_DIR, "run-{0}.db".format(self._run_id))
+
+        # self._db_logger = fuzz_logger_db.FuzzLoggerDb(
+        #     db_filename=self._db_filename, num_log_cases=fuzz_db_keep_only_n_pass_cases
+        # )
+
+        # Create a directory for all results of the current fuzzer.
+        from src.constants import CONSTANTS
+
+        self.results_path = os.path.join(CONSTANTS.RESULTS_DIR, self.fuzzer_name)
+        CONSTANTS.RESULTS_DIR = self.results_path
+        helpers.mkdir_safe(self.results_path)
+
+        if disable_db_logger:
+            self._fuzz_data_logger = fuzz_logger.FuzzLogger(fuzz_loggers)
+
+            # The database logger is necessary for the web app to work,
+            # hence the web app is disabled too if the database logger is disabled.
+            self.web_port = None
+            self._keep_web_open = False
+        else:
+            if db_filename is not None:
+                # db_filename can include a path, hence we might need to create directories.
+                helpers.mkdir_safe(db_filename, file_included=True)
+                self._db_filename = db_filename
+            else:
+                # helpers.mkdir_safe(os.path.join(constants.RESULTS_DIR))
+                # self._db_filename = os.path.join(constants.RESULTS_DIR, "run-{0}.db".format(self._run_id))
+                self._db_filename = os.path.join(self.results_path, f"{self.fuzzer_name}.db")
+
+            self._db_logger = fuzz_logger_db.FuzzLoggerDb(
+                db_filename=self._db_filename,
+                num_log_cases=fuzz_db_keep_only_n_pass_cases,
+            )
+
+            self._db_logger._db_cursor.execute(
+                "INSERT INTO cases VALUES(?, ?, ?)",
+                ("Initialization", 0, helpers.get_time_stamp()),
+            )
+
+            self._fuzz_data_logger = fuzz_logger.FuzzLogger(fuzz_loggers=[self._db_logger] + fuzz_loggers)
+        # CHANGE END
 
         self._crash_filename = "boofuzz-crash-bin-{0}".format(self._run_id)
 
-        self._fuzz_data_logger = fuzz_logger.FuzzLogger(fuzz_loggers=[self._db_logger] + fuzz_loggers)
+        # CHANGE START
+        # self._fuzz_data_logger = fuzz_logger.FuzzLogger(fuzz_loggers=[self._db_logger] + fuzz_loggers)
+        # CHANGE END
         self._check_data_received_each_request = check_data_received_each_request
         self._receive_data_after_each_request = receive_data_after_each_request
         self._receive_data_after_fuzz = receive_data_after_fuzz
@@ -582,6 +649,9 @@ class Session(pgraph.Graph):
 
         Returns:
             bool: True if any failures were found; False otherwise.
+
+        # CHANGES:
+        # Only call self._restart_target() after a crash if the target would not be restartet anyway.
         """
         crash_synopses = self._fuzz_data_logger.failed_test_cases.get(self._fuzz_data_logger.most_recent_test_id, [])
         if len(crash_synopses) > 0:
@@ -626,7 +696,10 @@ class Session(pgraph.Graph):
                     self.total_mutant_index += skipped
                     self.mutant_index += skipped
 
-            self._restart_target(target)
+            # CHANGE START
+            if self.restart_interval == 0 or (self.num_cases_actually_fuzzed + 1) % self.restart_interval != 0:
+                # CHANGE END
+                self._restart_target(target)
             return True
         else:
             return False
@@ -704,6 +777,10 @@ class Session(pgraph.Graph):
 
         Raises:
              exception.BoofuzzRestartFailedError: if restart fails.
+
+        # CHANGES:
+        # Do not sleep for three seconds after restarting.
+        # Do not call target.monitors_alive() because the OpenOCDMonitor is always live.
         """
 
         # TODO: reuse_target_connection seems to be only handled when using
@@ -727,8 +804,10 @@ class Session(pgraph.Graph):
                 self._fuzz_data_logger.log_info("Restarting target process using {}".format(monitor.__class__.__name__))
                 if monitor.restart_target(target=target, fuzz_data_logger=self._fuzz_data_logger, session=self):
                     # TODO: doesn't this belong in the process monitor?
-                    self._fuzz_data_logger.log_info("Giving the process 3 seconds to settle in")
-                    time.sleep(3)
+                    # CHANGE START
+                    # self._fuzz_data_logger.log_info("Giving the process 3 seconds to settle in")
+                    # time.sleep(3)
+                    # CHANGE END
                     restarted = True
                     break
 
@@ -742,7 +821,9 @@ class Session(pgraph.Graph):
             time.sleep(self.restart_sleep_time)
 
         # pass specified target parameters to the PED-RPC server to re-establish connections.
-        target.monitors_alive()
+        # CHANGE START
+        # target.monitors_alive()
+        # CHANGE END
 
     def server_init(self):
         """Called by fuzz() to initialize variables, web interface, etc."""
@@ -949,7 +1030,21 @@ class Session(pgraph.Graph):
 
         Returns:
             None
+
+        # CHANGES:
+        # If the count_test_cases argument is passed the number of test cases is returned and the fuzzer is not started.
         """
+
+        # CHANGE START
+        if self._count_test_cases:
+            print("Counting test cases...")
+            test_case_count = 0
+            for test_case in self._generate_mutations_indefinitely():
+                test_case_count += 1
+            print(f"{test_case_count} test cases found")
+            return
+        # CHANGE END
+
         self.total_mutant_index = 0
 
         if name is None or name == "":
@@ -1059,6 +1154,10 @@ class Session(pgraph.Graph):
 
         Returns:
             None
+
+        # CHANGES:
+        # Save the current mutation context for the OpenOCDMonitor.
+        # Print/send a summary after fuzzing.
         """
         self.server_init()
 
@@ -1082,6 +1181,12 @@ class Session(pgraph.Graph):
                     self._fuzz_data_logger.open_test_step("restart interval of %d reached" % self.restart_interval)
                     self._restart_target(self.targets[0])
 
+                # CHANGE START
+                # Save the current mutation context to generate the current mutation of the primitive specified in the
+                # "not_equal_to_transmitted", "log_transmitted_if_crashed", or "log_transmitted_if_not_crashed" setting.
+                self._current_mutation_context = mutation_context
+                # CHANGE END
+
                 self._fuzz_current_case(mutation_context)
 
                 self.num_cases_actually_fuzzed += 1
@@ -1093,13 +1198,18 @@ class Session(pgraph.Graph):
                 self.targets[0].close()
 
             if self._keep_web_open and self.web_port is not None:
-                self.end_time = time.time()
+                # CHANGE START
+                # self.end_time = time.time()
+                # print(
+                #     "\nFuzzing session completed. Keeping webinterface up on {}:{}".format(
+                #         self.web_address, self.web_port
+                #     ),
+                #     "\nPress ENTER to close webinterface",
+                # )
                 print(
-                    "\nFuzzing session completed. Keeping webinterface up on {}:{}".format(
-                        self.web_address, self.web_port
-                    ),
-                    "\nPress ENTER to close webinterface",
+                    f"\nKeeping webinterface up on http://localhost:{self.web_port}\nPress ENTER to close webinterface"
                 )
+                # CHANGE END
                 input()
         except KeyboardInterrupt:
             # TODO: should wait for the end of the ongoing test case, and stop gracefully netmon and procmon
@@ -1120,6 +1230,28 @@ class Session(pgraph.Graph):
         finally:
             self._fuzz_data_logger.close_test()
 
+            # CHANGE START
+            summary = f"\nFuzzing session completed: {self.fuzzer_name}\n"
+            summary += f"index_start: {self._index_start}, index_end: {self._index_end}"
+
+            if hasattr(self.targets[0]._target_connection, "_openocd_port"):
+                summary += f", openocd_port: {self.targets[0]._target_connection._openocd_port}"
+            if hasattr(self.targets[0]._target_connection, "_openocd_bus_port"):
+                summary += f", openocd_bus_port: {self.targets[0]._target_connection._openocd_bus_port}"
+
+            summary += "\n"
+            summary += f"Runtime: {datetime.timedelta(seconds=self.runtime)}\n"
+            summary += self._fuzz_data_logger.failure_summary()
+            summary += "\n"
+
+            print(summary)
+
+            if self._slack_notification:
+                from src.helpers import send_slack_notification
+
+                send_slack_notification(self._fuzz_data_logger, summary)
+            # CHANGE END
+
     def _generate_single_case_by_index(self, test_case_index):
         fuzz_index = 1
         for m in self._generate_mutations_indefinitely():
@@ -1130,8 +1262,15 @@ class Session(pgraph.Graph):
             fuzz_index += 1
 
     def _generate_mutations_indefinitely(self, max_depth=None, path=None):
-        """Yield MutationContext with n mutations per message over all messages, with n increasing indefinitely."""
-        depth = 1
+        """Yield MutationContext with n mutations per message over all messages, with n increasing indefinitely.
+
+        # CHANGES:
+        # Instead of depth being always set to 1, it can be configured using the start_depth argument of the Session object.
+        """
+
+        # CHANGE START
+        depth = self._start_depth
+        # CHANGE START
         while max_depth is None or depth <= max_depth:
             valid_case_found_at_this_depth = False
             for m in self._generate_n_mutations(depth=depth, path=path):

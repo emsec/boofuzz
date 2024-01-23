@@ -1,3 +1,7 @@
+.. _boofuzz: https://github.com/jtpereyda/boofuzz
+.. _ConFuzz: https://github.com/emsec/ConFuzz
+**Note:** This repository is a fork of `boofuzz`_ containing some necessary changes for the `ConFuzz`_ framework.
+
 .. image:: https://github.com/jtpereyda/boofuzz/raw/master/artwork/boo-logo-dark.svg
     :width: 60%
     :alt: boofuzz logo

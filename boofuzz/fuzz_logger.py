@@ -90,9 +90,18 @@ class FuzzLogger(IFuzzLogger):
         """Return test summary string based on fuzz logger results.
 
         :return: Test summary string, may be multi-line.
+
+        # CHANGES:
+        # Calculate passed test cases by subtracting failed and error test cases from the total test case count
+        # because a test case is counted as passed if no crash is monitored for a single register,
+        # even though a crash might have occurred in other registers.
         """
         summary = "Test Summary: {0} tests ran.\n".format(self.test_case_count)
-        summary += "PASSED: {0} test cases.\n".format(self.passed_test_case_count)
+        # CHANGE START
+        summary += "PASSED: {0} test cases.\n".format(
+            self.test_case_count - len(self.failed_test_cases) - len(self.error_test_cases)
+        )
+        # CHANGE END
 
         if len(self.failed_test_cases) > 0:
             summary += "FAILED: {0} test cases:\n".format(len(self.failed_test_cases))
